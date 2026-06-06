@@ -2,6 +2,7 @@ import 'dart:ui' as ui show TextHeightBehavior;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:smart_text_flutter/src/custom_emoji.dart';
 import 'package:smart_text_flutter/src/extensions/item_span_default_config.dart';
 import 'package:smart_text_flutter/smart_text_flutter.dart';
 
@@ -96,6 +97,14 @@ class SmartText extends StatefulWidget {
 class _SmartTextState extends State<SmartText> {
   late Future<List<ItemSpan>> classifyTextFuture;
 
+  /// URLs for custom-emoji tokens swapped out of [widget.text] by
+  /// [CustomEmoji.protect] before classification. Sentinels left in the
+  /// classified spans are restored to inline images using this list.
+  List<String> _emojiUrls = const [];
+
+  /// Inline emoji size, derived from the configured text size.
+  double get _emojiSize => widget.config?.textStyle?.fontSize ?? 16;
+
   @override
   void initState() {
     super.initState();
@@ -111,7 +120,11 @@ class _SmartTextState extends State<SmartText> {
   }
 
   Future<List<ItemSpan>> getItemSpans() async {
-    return SmartTextFlutter.classifyText(widget.text);
+    // Protect custom-emoji tokens before classification — otherwise the native
+    // classifier detects the URL inside `<:name:url>` and shreds the token.
+    final (protectedText, urls) = CustomEmoji.protect(widget.text);
+    _emojiUrls = urls;
+    return SmartTextFlutter.classifyText(protectedText);
   }
 
   @override
@@ -121,10 +134,13 @@ class _SmartTextState extends State<SmartText> {
       builder: (context, snapshot) {
         List<InlineSpan> inlineSpanList = [];
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          // Classification unavailable — still protect tokens so custom emoji
+          // render (and the raw `<:name:url>` never leaks through).
+          final (protectedText, _) = CustomEmoji.protect(widget.text);
           inlineSpanList.addAll(getTextInlineSpans(ItemSpan(
-            text: widget.text,
+            text: protectedText,
             type: ItemSpanType.text,
-            rawValue: widget.text,
+            rawValue: protectedText,
           )));
         } else {
           for (final span in snapshot.data!) {
@@ -214,7 +230,8 @@ class _SmartTextState extends State<SmartText> {
   }
 
   List<String> splitMentioned(String input) {
-    RegExp regex = RegExp(r"((^)|(( )+))@[\w._]+(($)|(( )+))"); // old RegExp(r"((^)|(( )+))@\w+(($)|(( )+))");
+    RegExp regex = RegExp(
+        r"((^)|(( )+))@[\w._]+(($)|(( )+))"); // old RegExp(r"((^)|(( )+))@\w+(($)|(( )+))");
     Iterable<Match> matches = regex.allMatches(input);
     List<String> parts = [];
     int lastEnd = 0;
@@ -234,7 +251,8 @@ class _SmartTextState extends State<SmartText> {
   }
 
   List<InlineSpan> getTextInlineSpans(ItemSpan span) {
-    return splitMentioned(span.text).map((text) {
+    final List<InlineSpan> result = [];
+    for (final text in splitMentioned(span.text)) {
       if (text.trim().startsWith('@')) {
         final int leftPadding = text.length - text.trimLeft().length;
         final int rightPadding = text.length - text.trimRight().length;
@@ -242,7 +260,7 @@ class _SmartTextState extends State<SmartText> {
 
         // Only highlight if username is in mentionedUsers list
         if (widget.mentionedUsers.contains(username)) {
-          return TextSpan(
+          result.add(TextSpan(
             text: List.generate(leftPadding, (_) => " ").join(),
             children: [
               TextSpan(
@@ -267,15 +285,26 @@ class _SmartTextState extends State<SmartText> {
             style: span.defaultConfig.textStyle?.merge(
               widget.config?.textStyle,
             ),
-          );
+          ));
+          continue;
         }
       }
-      return TextSpan(
-        text: text,
-        style: span.defaultConfig.textStyle?.merge(
-          widget.config?.textStyle,
+      // Plain text slice — restore any protected custom-emoji sentinels to
+      // inline images. When there are no emoji this yields a single TextSpan.
+      result.addAll(
+        CustomEmoji.splitSpans(
+          text: text,
+          urls: _emojiUrls,
+          size: _emojiSize,
+          textSpanBuilder: (slice) => TextSpan(
+            text: slice,
+            style: span.defaultConfig.textStyle?.merge(
+              widget.config?.textStyle,
+            ),
+          ),
         ),
       );
-    }).toList();
+    }
+    return result;
   }
 }
