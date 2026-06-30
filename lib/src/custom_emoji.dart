@@ -3,26 +3,28 @@ import 'package:flutter/widgets.dart';
 
 /// Discord-style custom (non-unicode) emoji support for [SmartText].
 ///
-/// A custom emoji is carried inside the message string as a self-contained
-/// token:
+/// Two wire forms are supported:
+///   * NEW id form `:id:` (e.g. `:29538:`) — carries only an id; the image URL
+///     is resolved by a caller-supplied `resolver(id)` (the package itself has
+///     no catalog/CDN knowledge);
+///   * LEGACY form `<:name:https://cdn.example.com/pepe.webp>` — embeds its own
+///     URL.
 ///
-///     <:name:https://cdn.example.com/pepe.webp>
-///
-/// The token embeds its own image URL. The trouble is that [SmartText] first
-/// runs the text through the native classifier ([SmartTextFlutter.classifyText]),
-/// which would detect the `https://…` *inside* the token and split it into
-/// separate text/url spans — shredding the token.
-///
-/// So the renderer [protect]s every token into an inert private-use sentinel
-/// (no `http`, no `<`/`>`, not a real glyph) *before* classification, then
-/// [splitSpans] turns the surviving sentinels into inline image [WidgetSpan]s
-/// when the final spans are built. The plain slices around the sentinels are
-/// rebuilt by the caller so existing mention/style handling is preserved.
+/// The trouble is that [SmartText] first runs the text through the native
+/// classifier ([SmartTextFlutter.classifyText]), which would detect a `https://…`
+/// inside the legacy token (or split a bare `:id:`) and shred it. So the renderer
+/// [protect]s every token into an inert private-use sentinel *before*
+/// classification, then [splitSpans] turns the surviving sentinels into inline
+/// image [WidgetSpan]s. The plain slices around the sentinels are rebuilt by the
+/// caller so existing mention/style handling is preserved.
 class CustomEmoji {
   CustomEmoji._();
 
-  /// `<:name:url>` — name has no `:` `<` `>`; url has no `>`.
+  /// `<:name:url>` — name has no `:` `<` `>`; url has no `>`. (legacy)
   static final RegExp pattern = RegExp(r'<:([^:<>]+):([^>]+)>');
+
+  /// `:id:` — digits only, so it never matches `:)`-style faces or shortcodes.
+  static final RegExp idPattern = RegExp(r':(\d+):');
 
   // Private-use Unicode sentinels — not a shortcode, not HTML, not a URL, so the
   // classifier leaves them untouched. Distinct from any app-side sentinels.
@@ -30,21 +32,44 @@ class CustomEmoji {
   static const String _close = '\u{F8FE}';
   static final RegExp _sentinelPattern = RegExp('$_open(\\d+)$_close');
 
-  /// True when [text] contains at least one raw custom-emoji token.
-  static bool hasToken(String text) =>
-      text.contains('<:') && pattern.hasMatch(text);
+  /// True when [text] contains at least one custom-emoji token — a legacy
+  /// `<:name:url>`, or (when a [resolver] is provided) a new `:id:`.
+  static bool hasToken(String text, {String Function(String id)? resolver}) {
+    if (text.contains('<:') && pattern.hasMatch(text)) return true;
+    return resolver != null && idPattern.hasMatch(text);
+  }
 
   /// Replace every custom-emoji token with an inert sentinel, returning the
   /// rewritten text and the ordered list of URLs the sentinels map back to.
   /// Run this *before* the classifier.
-  static (String text, List<String> urls) protect(String text) {
-    if (!text.contains('<:')) return (text, const []);
+  ///
+  /// Legacy `<:name:url>` tokens take their URL from the token itself. New
+  /// `:id:` tokens are only protected when a [resolver] is supplied (it maps the
+  /// id to an image URL); without one, `:id:` is left as plain text.
+  static (String text, List<String> urls) protect(String text, {String Function(String id)? resolver}) {
+    final bool hasLegacy = text.contains('<:');
+    final bool hasId = resolver != null && idPattern.hasMatch(text);
+    if (!hasLegacy && !hasId) return (text, const []);
+
     final urls = <String>[];
-    final out = text.replaceAllMapped(pattern, (match) {
-      final index = urls.length;
-      urls.add(match.group(2)!);
-      return '$_open$index$_close';
-    });
+    String out = text;
+
+    if (hasLegacy) {
+      out = out.replaceAllMapped(pattern, (match) {
+        final index = urls.length;
+        urls.add(match.group(2)!);
+        return '$_open$index$_close';
+      });
+    }
+
+    if (hasId) {
+      out = out.replaceAllMapped(idPattern, (match) {
+        final index = urls.length;
+        urls.add(resolver(match.group(1)!));
+        return '$_open$index$_close';
+      });
+    }
+
     return (out, urls);
   }
 

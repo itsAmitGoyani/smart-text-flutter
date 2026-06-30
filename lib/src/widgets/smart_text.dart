@@ -33,11 +33,18 @@ class SmartText extends StatefulWidget {
     this.textScaler,
     this.textWidthBasis,
     this.humanize = false,
+    this.customEmojiResolver,
   });
 
   /// The text to linkify
   /// This text will be classified and the links will be highlighted
   final String text;
+
+  /// Resolves a custom-emoji id (from a `:id:` token) to its image URL. When
+  /// null, only the legacy self-contained `<:name:url>` form renders and bare
+  /// `:id:` tokens are shown as plain text. The package has no catalog/CDN
+  /// knowledge — the host app injects this.
+  final String Function(String id)? customEmojiResolver;
 
   /// The list of mentioned users. This is used to highlight the mentioned users.
   final List<String> mentionedUsers;
@@ -121,8 +128,9 @@ class _SmartTextState extends State<SmartText> {
 
   Future<List<ItemSpan>> getItemSpans() async {
     // Protect custom-emoji tokens before classification — otherwise the native
-    // classifier detects the URL inside `<:name:url>` and shreds the token.
-    final (protectedText, urls) = CustomEmoji.protect(widget.text);
+    // classifier detects the URL inside `<:name:url>` (or splits a bare `:id:`)
+    // and shreds the token.
+    final (protectedText, urls) = CustomEmoji.protect(widget.text, resolver: widget.customEmojiResolver);
     _emojiUrls = urls;
     return SmartTextFlutter.classifyText(protectedText);
   }
@@ -135,8 +143,9 @@ class _SmartTextState extends State<SmartText> {
         List<InlineSpan> inlineSpanList = [];
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
           // Classification unavailable — still protect tokens so custom emoji
-          // render (and the raw `<:name:url>` never leaks through).
-          final (protectedText, _) = CustomEmoji.protect(widget.text);
+          // render (and the raw token never leaks through). `_emojiUrls` was set
+          // by getItemSpans() with the same resolver, so splitSpans resolves them.
+          final (protectedText, _) = CustomEmoji.protect(widget.text, resolver: widget.customEmojiResolver);
           inlineSpanList.addAll(getTextInlineSpans(ItemSpan(
             text: protectedText,
             type: ItemSpanType.text,
@@ -153,9 +162,7 @@ class _SmartTextState extends State<SmartText> {
                   style: span.defaultConfig.textStyle?.merge(
                     widget.addressConfig?.textStyle,
                   ),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap =
-                        () => _handleItemSpanTap(span, widget.addressConfig),
+                  recognizer: TapGestureRecognizer()..onTap = () => _handleItemSpanTap(span, widget.addressConfig),
                 ));
               case ItemSpanType.email:
                 inlineSpanList.add(TextSpan(
@@ -163,9 +170,7 @@ class _SmartTextState extends State<SmartText> {
                   style: span.defaultConfig.textStyle?.merge(
                     widget.emailConfig?.textStyle,
                   ),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap =
-                        () => _handleItemSpanTap(span, widget.emailConfig),
+                  recognizer: TapGestureRecognizer()..onTap = () => _handleItemSpanTap(span, widget.emailConfig),
                 ));
               case ItemSpanType.phone:
                 inlineSpanList.add(TextSpan(
@@ -173,9 +178,7 @@ class _SmartTextState extends State<SmartText> {
                   style: span.defaultConfig.textStyle?.merge(
                     widget.phoneConfig?.textStyle,
                   ),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap =
-                        () => _handleItemSpanTap(span, widget.phoneConfig),
+                  recognizer: TapGestureRecognizer()..onTap = () => _handleItemSpanTap(span, widget.phoneConfig),
                 ));
               case ItemSpanType.datetime:
                 inlineSpanList.add(TextSpan(
@@ -183,9 +186,7 @@ class _SmartTextState extends State<SmartText> {
                   style: span.defaultConfig.textStyle?.merge(
                     widget.dateTimeConfig?.textStyle,
                   ),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap =
-                        () => _handleItemSpanTap(span, widget.dateTimeConfig),
+                  recognizer: TapGestureRecognizer()..onTap = () => _handleItemSpanTap(span, widget.dateTimeConfig),
                 ));
               case ItemSpanType.url:
                 inlineSpanList.add(TextSpan(
@@ -193,8 +194,7 @@ class _SmartTextState extends State<SmartText> {
                   style: span.defaultConfig.textStyle?.merge(
                     widget.urlConfig?.textStyle,
                   ),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap = () => _handleItemSpanTap(span, widget.urlConfig),
+                  recognizer: TapGestureRecognizer()..onTap = () => _handleItemSpanTap(span, widget.urlConfig),
                 ));
             }
           }
@@ -230,8 +230,7 @@ class _SmartTextState extends State<SmartText> {
   }
 
   List<String> splitMentioned(String input) {
-    RegExp regex = RegExp(
-        r"((^)|(( )+))@[\w._]+(($)|(( )+))"); // old RegExp(r"((^)|(( )+))@\w+(($)|(( )+))");
+    RegExp regex = RegExp(r"((^)|(( )+))@[\w._]+(($)|(( )+))"); // old RegExp(r"((^)|(( )+))@\w+(($)|(( )+))");
     Iterable<Match> matches = regex.allMatches(input);
     List<String> parts = [];
     int lastEnd = 0;
